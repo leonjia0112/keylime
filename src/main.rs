@@ -1,17 +1,13 @@
-extern crate pretty_env_logger;
+extern crate futures;
+extern crate hyper;
 #[macro_use]
 extern crate log;
-
-extern crate serde_json;
-extern crate futures;
 extern crate libc;
-extern crate hyper;
-extern crate tempfile;
+extern crate pretty_env_logger;
 extern crate rustc_serialize;
-
-
-pub mod common;
-pub mod tpm;
+extern crate tempfile;
+mod common;
+mod tpm;
 
 use futures::future;
 use hyper::rt::Future;

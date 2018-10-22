@@ -1,26 +1,13 @@
-extern crate rustc_serialize;
 use super::*;
-use hyper::{header, Body, Response, StatusCode};
-use libc::{umask, geteuid};
-use rustc_serialize::json::Json;
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::prelude::*;
-use std::io::{Read, Write};
-use std::path::Path;
 use std::process::Command;
-use std::process::Output;
-use std::time::{Duration, SystemTime};
-use std::{thread, time};
-use tempfile::tempfile;
-use tempfile::NamedTempFile;
+use std::thread;
+use std::time::Duration;
+
 
 const MAX_TRY: usize = 10;
 const RETRY_SLEEP: Duration = Duration::from_millis(50);
 const TPM_IO_ERROR: i32 = 5;
 
-// temp global variable
-// not the final type 
 // static mut global_tpmdata = None;
 
 /***************************************************************
@@ -107,7 +94,6 @@ pub fn is_vtpm() -> Option<bool> {
 
             // ******* //
             println!("tpm manufacturer: {:?}", tpm_manufacturer);
-            
             Some(tpm_manufacturer.unwrap() == "ETHZ")
         }
     }
@@ -115,7 +101,6 @@ pub fn is_vtpm() -> Option<bool> {
 
 pub fn get_tpm_manufacturer<'a>() -> Option<&'a str> {
     // let return_output = run("getcapability -cap 1a".to_string());
-
 
     let placeholder = "ETHZ";
     Some(placeholder)
@@ -207,7 +192,6 @@ pub fn command_split(cmd: String) -> usize {
 execute tpm command through shell command
 */
 pub fn run<'a>(cmd: String) -> (Vec<u8>, Option<i32>) {
-
     /* stubbing  placeholder */
 
     let words: Vec<&str> = cmd.split(" ").collect();
@@ -231,7 +215,6 @@ pub fn run<'a>(cmd: String) -> (Vec<u8>, Option<i32>) {
     loop {
         // let t0 = System::now();
         // assume the system is linux
-            
         println!("number tries: {:?}", number_tries);
 
         match output.status.code().unwrap() {
@@ -254,8 +237,7 @@ pub fn run<'a>(cmd: String) -> (Vec<u8>, Option<i32>) {
             }
 
             _ => {}
-         } 
-
+        }
     }
 
     /*metric output placeholder*/
@@ -276,28 +258,24 @@ mod tests {
     #[test]
     fn fingerprint_getcapability_test() {
         assert_eq!(
-            fingerprint("getcapability -cap 5".to_string()), 
+            fingerprint("getcapability -cap 5".to_string()),
             "getcapability-cap5"
-        );  
+        );
     }
 
     #[test]
     fn fingerprint_getcapability_test2() {
         assert_eq!(
-            fingerprint("getcapability -n - e -cap 5".to_string()), 
+            fingerprint("getcapability -n - e -cap 5".to_string()),
             "getcapability-cap5"
-        );   
+        );
     }
 
     #[test]
     fn fingerprint_nv_readvalue_test() {
-        assert_eq!(
-            fingerprint("nv_readvalue".to_string()), 
-            "nv_readvalue"
-        );
+        assert_eq!(fingerprint("nv_readvalue".to_string()), "nv_readvalue");
     }
-
-
+  
     #[test]
     fn command_split_get_command() {
         let cmd = String::from("ls -d /usr/local/bin");
@@ -313,14 +291,10 @@ mod tests {
         assert_eq!(&cmd[s..cmd.len()], " -d /usr/local/bin");
     }
 
-    // #[test]
-    // fn run_ls_test() {
-    //  let cmd = String::from("ls -asl");
-
-    // }
     #[test]
     fn test_is_vtpm() {
         let return_value = is_vtpm();
         assert_eq!(return_value.unwrap(), true);
     }
-}    
+}
+
