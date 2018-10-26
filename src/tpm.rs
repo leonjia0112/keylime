@@ -1,63 +1,76 @@
 use super::*;
+use std::env;
+use std::error::Error;
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
 use std::process::Command;
+use std::process::Output;
 use std::thread;
 use std::time::Duration;
-
-
+use std::time::SystemTime;
+// use std::fs::File;
+// use std::path::Path;
+use openssl::sha;
+use tempfile::NamedTempFile;
 const MAX_TRY: usize = 10;
 const RETRY_SLEEP: Duration = Duration::from_millis(50);
 const TPM_IO_ERROR: i32 = 5;
+const RETRY: usize = 4;
+const EXIT_SUCCESS: i32 = 0;
 
-// static mut global_tpmdata = None;
+static EMPTYMASK: &'static str = "1";
+static EMPTY_PCR: &'static str = "0000000000000000000000000000000000000000";
+
+
+/*
+ * tpm data struct for tpmdata.json file IO
+ */
+#[derive(Serialize, Deserialize, Debug)]
+struct TpmData {
+    aik_pw: String,
+    ek: String,
+    owner_pw: String,
+    aik_handle: String,
+    aikmod: String,
+    aikpriv: String,
+    aik: String,
+}
 
 /***************************************************************
-package from tpm_initialize.py        
+ftpm_initialize.py        
 *****************************************************************/
 /*
-input: a string value
+input: content key in tpmdata
 return: deserlized json object
 
->>>>> currently not used <<<<<
+getting the tpm data struct and convert it to a json value object to access to a particular field inside the tpm data file
 */
-/*fn get_tpm_metadata(key: String) -> String {
-    match global_tpmdata {
-        Some("") => {
-            global_tpmdata = read_tpm_data()
-        },
-        _ => {},
-    }
-    global_tpmdata.find("key")
-}*/
+fn get_tpm_metadata(content_key: String) -> Option<String> {
+    let t_data = read_tpm_data().unwrap();
+    let t_data_json_value = serde_json::to_value(t_data).unwrap();
+    Some(t_data_json_value[content_key].to_string())
+}
+
 
 /*
 input: none
 return: tpmdata in json object
 
->>>>> currently not used <<<<<
+read in tpmdata.json file and convert it to a pre-defined struct
 */
-/*fn read_tpm_data() -> Result<Json> {
-    let path = Path::new("tpmdata.json");
-    if path.exists() {
-        let f = File::iopen("tpmdata.json");
+fn read_tpm_data() -> Result<TpmData, Box<Error>> {
+    let file = File::open("tpmdata.json")?;
+    let data: TpmData = serde_json::from_reader(file)?;
+    Ok(data)
+}
 
-        //return readin json object
-        let mut file = File::open("tpmdata.json").unwrap();
-        let mut raw_data = String::new();
-        file.read_to_string(&mut raw_data).unwrap();
-        tpm_data = Json::from_str(&raw_data).unwrap();
-        tpm_data
-    } else {
-        None
-    }
-}*/
 
 /*
 input: noen
 return: write result
 
 write tpmdata to tpmdata.json file to store the value
-
->>>>> currently not used <<<<<
 */
 /*fn write_tpm_data()  -> Result<()>{
 
@@ -86,6 +99,13 @@ write tpmdata to tpmdata.json file to store the value
     Ok()
 }*/
 
+
+/*
+ * input: None
+ * output: boolean 
+ *
+ * If tpm is a tpm elumator, return true, other wise return false
+ */
 pub fn is_vtpm() -> Option<bool> {
     match common::STUB_VTPM {
         true => Some(true),
@@ -99,7 +119,12 @@ pub fn is_vtpm() -> Option<bool> {
     }
 }
 
-pub fn get_tpm_manufacturer<'a>() -> Option<&'a str> {
+
+/*
+ * getting the tpm manufacturer information
+ * is_vtpm helper method
+ */
+fn get_tpm_manufacturer<'a>() -> Option<&'a str> {
     // let return_output = run("getcapability -cap 1a".to_string());
 
     let placeholder = "ETHZ";
@@ -107,113 +132,210 @@ pub fn get_tpm_manufacturer<'a>() -> Option<&'a str> {
 }
 
 /***************************************************************
-package from tpm_nvram.py    
+tpm_quote.py    
 *****************************************************************/
 
-/*
->>>>> currently not used <<<<<
-*/
-/*fn write_key_nvram(key: String) {
-    let owner_password = tpm_initialize::get_tpm_metadata("owner_password");
+pub fn create_quote(nonce: String, data: String, mut pcrmask: String) -> Option<String> {
+    let quote_path = NamedTempFile::new().unwrap();
+    let mut quote = String::new();
+    let key_handle = get_tpm_metadata("aik_handle".to_string());
+    let aik_password = get_tpm_metadata("aik_pw".to_string());
+    let mut command = String::new();
 
-    let mut key_file = NamedTempFile::new().unwrap();
-    key_file.write(owner_password.as_bytes());
-    key_file.flush();
-
-    tpm_exec::run("nv_definespace -pwdo {} -in 1 -sz {} -pwdd {} -per 40004", owner_password, common::BOOTSTRAP_KEY_SIZE, owner_password);
-    tpm_exec::run("nv_writevalue -pwdd {} -in 1 -if {}", owner_password,key_file.path());
-}*/
-
-/***************************************************************
-package from tpm_exec.py  
-*****************************************************************/
-
-/*
-create fingerprint for commad
-
-input: String::String
-return the fingerprint of the command
-
->>>>> currently not used <<<<<
-*/
-pub fn fingerprint(cmd: String) -> String {
-    let words: Vec<&str> = cmd.split(" ").collect();
-    // println!("{:?}", words);
-
-    let mut fprt: String = words[0].to_string();
-    // println!("{:?}", fprt);
-
-    match fprt.as_ref() {
-        "getcapability" => {
-            if cmd.contains("-cap 5") {
-                fprt.push_str("-cap5");
-            } else if cmd.contains("-cap la") {
-                fprt.push_str("-capls");
-            }
-        }
-
-        "nv_readvalue" => {
-            if cmd.contains("-in 100f000") {
-                fprt.push_str("-in100f000");
-            } else if cmd.contains("-in 1") {
-                fprt.push_str("-in1");
-            }
-        }
-
-        _ => {}
-    };
-
-    fprt
-}
-
-/*
-split command to command and its argument
-
-input: String::String
-return: the index of the first space, usize
-
-find the the first command and return the index to seperate the string 
-
->>>>> currently not used <<<<<
-*/
-pub fn command_split(cmd: String) -> usize {
-    let bytes = cmd.as_bytes();
-
-    for (i, &item) in bytes.iter().enumerate() {
-        if item == b' ' {
-            return i;
-        }
+    if pcrmask == "".to_string() {
+        pcrmask = EMPTYMASK.to_string();
     }
 
-    cmd.len()
+    if !(data == "".to_string()) {
+        let pcrmask_int: i32 = pcrmask.parse().unwrap();
+        let pcrmask_mod = format!("0x{}", (pcrmask_int + (1 << common::TPM_DATA_PCR)));
+        command = format!("pcrreset -ix {}", common::TPM_DATA_PCR);
+        run(command, 
+            EXIT_SUCCESS, 
+            true,
+            false,
+            String::new(),
+        );
+
+        // sha1 hash data
+        let mut hasher = sha::Sha1::new();
+        hasher.update(data.as_bytes());
+        let data_sha1_hash = hasher.finish();
+
+        command = format!("extend -ix {} -ic {}", 
+            common::TPM_DATA_PCR, 
+            hex::encode(data_sha1_hash)
+        );
+
+        run(command, 
+            EXIT_SUCCESS,
+            true,
+            false,
+            String::new(),
+        );
+    }
+
+    // store quote into the temp file that will be extracted later
+    command = format!("tpmquote -hk {} -pwdk {} -bm {} -nonce {} -noverify -oq {}", key_handle.unwrap(),
+        aik_password.unwrap(),
+        pcrmask,
+        nonce,
+        quote_path.path().to_str().unwrap().to_string(),
+    );
+
+    let (return_output, exit_code, quote_raw) = run(command, 
+        EXIT_SUCCESS,
+        true,
+        false,
+        quote_path.path().to_string_lossy().to_string(),
+    );
+
+    // to be continue
+    // this is not what it is
+    /*quote = base64.b64encode(quoteraw.encode("zlib"))*/
+    quote_raw
 }
 
+
+pub fn create_deep_quote(nonce: String, data: String, mut pcrmask: String, mut vpcrmask: String) -> Option<String> {
+    let quote_path = NamedTempFile::new().unwrap();
+    let mut quote = String::new();
+    let key_handle = get_tpm_metadata("aik_handle".to_string());
+    let aik_password = get_tpm_metadata("aik_pw".to_string());
+    let owner_password = get_tpm_metadata("owner_pw".to_string());
+    let mut command = String::new();
+
+    if pcrmask == "".to_string() {
+        pcrmask = EMPTYMASK.to_string();
+    }
+
+    if vpcrmask == "".to_string() {
+        vpcrmask = EMPTYMASK.to_string();
+    }
+
+    if !(data == "".to_string()) {
+        let vpcrmask_int: i32 = vpcrmask.parse().unwrap();
+        let vpcrmask_mod = format!("0x{}", (vpcrmask_int + (1 << common::TPM_DATA_PCR)));
+        command = format!("pcrreset -ix {}", common::TPM_DATA_PCR);
+        run(command, 
+            EXIT_SUCCESS, 
+            true,
+            false,
+            String::new(),
+        );
+
+        let mut hasher = sha::Sha1::new();
+        hasher.update(data.as_bytes());
+        let data_sha1_hash = hasher.finish();
+
+        command = format!("extend -ix {} -ic {}", 
+            common::TPM_DATA_PCR, 
+            hex::encode(data_sha1_hash)
+        );
+
+        run(command, 
+            EXIT_SUCCESS,
+            true,
+            false,
+            String::new(),
+        );
+    }
+
+    // store quote into the temp file that will be extracted later
+    command = format!("deepquote -vk {} -hm {} -vm {} -nonce {} -pwdo {} -pwdk {} -oq {}", key_handle.unwrap(),
+        pcrmask,
+        vpcrmask,
+        nonce,
+        owner_password.unwrap(),
+        aik_password.unwrap(),
+        quote_path.path().to_str().unwrap()
+    );
+
+    let (return_output, exit_code, quote_raw) = run(command, 
+        EXIT_SUCCESS,
+        true,
+        false,
+        quote_path.path().to_string_lossy().to_string(),
+    );
+
+    // to be continue
+    // this is not what it is
+    /*quote = base64.b64encode(quoteraw.encode("zlib"))*/
+    quote_raw
+}
+
+pub fn check_mask(ima_mask: String, ima_pcr: usize) -> bool {
+    if ima_mask.is_empty() {
+        return false;
+    }
+    let ima_mask_int: i32 = ima_mask.parse().unwrap();
+    match (1 << ima_pcr) & ima_mask_int {
+        0 => return false,
+        _ => return true,
+    } 
+
+}
+
+/***************************************************************
+tpm_nvram.py    
+*****************************************************************/
+
+/***************************************************************
+tpm_exec.py  
+*****************************************************************/
+
 /*
-execute tpm command through shell command
-*/
-pub fn run<'a>(cmd: String) -> (Vec<u8>, Option<i32>) {
+ * Input:
+ *     cmd: command to be executed
+ *     except_code: return code that needs extra handling
+ *     raise_on_error: raise exception/panic while encounter error option
+ *     lock: lock engage option
+ *     output_path: file output location
+ * return:
+ *     tuple contains (standard output, return code, and file output)
+ *
+ * execute tpm command through shell commands and return the execution result in a tuple
+ */
+fn run<'a>(cmd: String, except_code: i32, raise_on_error: bool, lock: bool, output_path: String) -> (Vec<u8>, Option<i32>, Option<String>) {
+
     /* stubbing  placeholder */
 
+    // tokenize input command
     let words: Vec<&str> = cmd.split(" ").collect();
-    // execute the tpm commands
     let mut number_tries = 0;
-    // let pivot = command_split(cmd.clone());
-    // let command = &cmd[0..pivot];
-    // let args = &cmd[pivot..cmd.len()];
-    let command = &words[0];
+    let mut command = &words[0];
     let args = &words[1..words.len()];
 
-    println!("{:?}", command);
-    println!("{:?}", args);
+    // setup environment variable
+    let mut env_vars: HashMap<String, String> = HashMap::new();
+    for (key, value) in env::vars() {
+        // println!("{}: {}", key, value);
+        env_vars.insert(key.to_string(), value.to_string());
+    }
 
-    // execute the command
-    let mut output = Command::new(&cmd)
-        .args(args)
-        .output()
-        .expect("failed to execute process");
+    env_vars.insert("TPM_SERVER_PORT".to_string(), "9998".to_string());
+    env_vars.insert("TPM_SERVER_NAME".to_string(), "localhost".to_string());
+    env_vars.get_mut("PATH").unwrap().push_str(common::TPM_TOOLS_PATH);
+
+    let mut t_diff: u64 = 0;
+    let mut output: Output;
 
     loop {
-        // let t0 = System::now();
+        let t0 = SystemTime::now();
+
+        // command execution
+        output = Command::new(&cmd)
+            .args(args)
+            .envs(&env_vars)
+            .output()
+            .expect("failed to execute process");
+
+        // measure execution time
+        match t0.duration_since(t0) {
+            Ok(t_delta) => t_diff = t_delta.as_secs(),
+            Err(_) => {},
+        }
+
         // assume the system is linux
         println!("number tries: {:?}", number_tries);
 
@@ -221,76 +343,66 @@ pub fn run<'a>(cmd: String) -> (Vec<u8>, Option<i32>) {
             TPM_IO_ERROR => {
                 number_tries += 1;
                 if number_tries >= MAX_TRY {
-                    println!("TPM appears to be in use by another application.  Keylime is incompatible with other TPM TSS applications like trousers/tpm-tools. Please uninstall or disable.");
-                    //log placeholder
+                    error!("TPM appears to be in use by another application.  Keylime is incompatible with other TPM TSS applications like trousers/tpm-tools. Please uninstall or disable.");
                     break;
                 }
 
-                output = Command::new(&cmd)
-                    .args(args)
-                    .output()
-                    .expect("failed to execute process");
-
-                // log placeholder
+                info!("Failed to call TPM {}/{} times, trying again in {} seconds...",number_tries, 
+                    MAX_TRY, 
+                    RETRY
+                );
 
                 thread::sleep(RETRY_SLEEP);
             }
-
-            _ => {}
+            _ => {
+                break
+            }
         }
     }
 
+    let return_output = output.stdout;
+    let return_code = output.status.code();
+
+    if return_code.unwrap() == except_code && raise_on_error {
+        panic!("Command: {} returned {}, expected {}, output {}", 
+            cmd,
+            return_code.unwrap(),
+            except_code.to_string(),
+            String::from_utf8_lossy(&return_output)
+        );
+    }
+
+    let mut file_output: String = String::new();
+
+    match read_file_output_path(output_path) {
+        Ok(content) => file_output = content,
+        Err(_) => {},
+    }
+
+
     /*metric output placeholder*/
 
-    (output.stdout, output.status.code())
+    (return_output, return_code, Some(file_output))
 }
+
+/*
+ * input: file name
+ * return: the content of the file int Result<>
+ * 
+ * run method helper method
+ * read in the file and  return the content of the file into a Result enum
+ */
+fn read_file_output_path(output_path: String) -> std::io::Result<String> {
+    let mut file = File::open(output_path)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(contents)
+}   
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
-
-    #[test]
-    fn fingerprint_it_works() {
-        assert_eq!(fingerprint("a b c".to_string()), "a");
-    }
-
-    #[test]
-    fn fingerprint_getcapability_test() {
-        assert_eq!(
-            fingerprint("getcapability -cap 5".to_string()),
-            "getcapability-cap5"
-        );
-    }
-
-    #[test]
-    fn fingerprint_getcapability_test2() {
-        assert_eq!(
-            fingerprint("getcapability -n - e -cap 5".to_string()),
-            "getcapability-cap5"
-        );
-    }
-
-    #[test]
-    fn fingerprint_nv_readvalue_test() {
-        assert_eq!(fingerprint("nv_readvalue".to_string()), "nv_readvalue");
-    }
   
-    #[test]
-    fn command_split_get_command() {
-        let cmd = String::from("ls -d /usr/local/bin");
-        let s = command_split(cmd.clone());
-        assert_eq!(&cmd[0..s], "ls");
-    }
-
-    #[test]
-    fn command_split_get_args() {
-        let cmd = String::from("ls -d /usr/local/bin");
-        let s = command_split(cmd.clone());
-        // println!("**************{:?}", &cmd[s+1..cmd.len()-1]);
-        assert_eq!(&cmd[s..cmd.len()], " -d /usr/local/bin");
-    }
-
     #[test]
     fn test_is_vtpm() {
         let return_value = is_vtpm();

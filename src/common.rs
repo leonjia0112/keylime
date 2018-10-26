@@ -1,23 +1,16 @@
 use super::*;
 use hyper::{Response, StatusCode, Body, header};
 use std::collections::HashMap;
-use rustc_serialize::json::Json;
-use std::fs::File;
-use std::io::prelude::*;
-use std::io::{Read, Write};
-use libc::{umask, geteuid};
-use std::path::Path;
-use std::process::Command;
-use std::process::Output;
-use std::{thread, time};
-use std::time::{Duration, SystemTime};
-use tempfile::tempfile;
-use tempfile::NamedTempFile;
+use serde_json::{Map, Value};
 
-
-pub const BOOTSTRAP_KEY_SIZE: usize = 32;
 pub const STUB_VTPM: bool = false;
-
+pub const STUB_IMA: bool = true;
+pub const TPM_DATA_PCR: usize = 16;
+pub const IMA_PCR: usize = 10;
+pub static RSA_PUBLICKEY_EXPORTABLE: &'static str = "placeholder";
+pub static TPM_TOOLS_PATH: &'static str = "/usr/local/bin/";
+pub static IMA_ML_STUB: &'static str = "../scripts/ima/ascii_runtime_measurements";
+pub static IMA_ML: &'static str = "/sys/kernel/security/ima/ascii_runtime_measurements";
 
 pub const STUB_VTPM: bool = false;
 /*
@@ -29,11 +22,17 @@ pub const STUB_VTPM: bool = false;
 pub fn json_response_content(
     code: i32,
     status: String,
-    results: String,
+    results: Map<String, Value>,
 ) -> Response<Body> {
-    let data = vec![code.to_string(), status, results];
 
-    match serde_json::to_string(&data) {
+    // integrate everything to one single map contains all the results
+    let mut integrated_results = results.clone();
+    integrated_results.insert("code".into(), code.into());
+    integrated_results.insert("status".into(), status.into());
+
+    let results_value: Value = results.into();
+
+    match serde_json::to_string(&results_value) {
         Ok(json) => {
             // return a json response
             Response::builder()
