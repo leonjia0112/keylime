@@ -8,10 +8,8 @@ extern crate rustc_serialize;
 extern crate tempfile;
 #[macro_use]
 extern crate serde_derive;
-
 extern crate serde;
 extern crate serde_json;
-
 extern crate openssl;
 extern crate hex;
 

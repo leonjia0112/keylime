@@ -52,6 +52,7 @@ fn get_tpm_metadata(content_key: String) -> Option<String> {
     Some(t_data_json_value[content_key].to_string())
 }
 
+
 /*
 input: none
 return: tpmdata in json object
@@ -63,6 +64,7 @@ fn read_tpm_data() -> Result<TpmData, Box<Error>> {
     let data: TpmData = serde_json::from_reader(file)?;
     Ok(data)
 }
+
 
 /*
 input: noen
@@ -116,6 +118,7 @@ pub fn is_vtpm() -> Option<bool> {
         }
     }
 }
+
 
 /*
  * getting the tpm manufacturer information
@@ -399,10 +402,11 @@ fn read_file_output_path(output_path: String) -> std::io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+  
     #[test]
     fn test_is_vtpm() {
         let return_value = is_vtpm();
         assert_eq!(return_value.unwrap(), true);
     }
 }
+

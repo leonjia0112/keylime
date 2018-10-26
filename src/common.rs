@@ -1,11 +1,7 @@
-extern crate futures;
-extern crate hyper;
-extern crate serde_json;
-
-use hyper::{header, Body, Response, StatusCode};
+use super::*;
+use hyper::{Response, StatusCode, Body, header};
 use std::collections::HashMap;
 use serde_json::{Map, Value};
-
 
 pub const STUB_VTPM: bool = false;
 pub const STUB_IMA: bool = true;
@@ -16,6 +12,7 @@ pub static TPM_TOOLS_PATH: &'static str = "/usr/local/bin/";
 pub static IMA_ML_STUB: &'static str = "../scripts/ima/ascii_runtime_measurements";
 pub static IMA_ML: &'static str = "/sys/kernel/security/ima/ascii_runtime_measurements";
 
+pub const STUB_VTPM: bool = false;
 /*
  * convert the input into a Response struct
  *
