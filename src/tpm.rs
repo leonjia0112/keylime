@@ -398,7 +398,7 @@ fn read_file_output_path(output_path: String) -> std::io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+  
     #[test]
     fn test_is_vtpm() {
         let return_value = is_vtpm();

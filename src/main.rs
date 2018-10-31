@@ -94,7 +94,6 @@ fn response_function(req: Request<Body>) -> BoxFut {
                             "Success".to_string(),
                             response,
                         );
-
                         info!("GET key challenge returning 200 response");
                     }
 
@@ -112,7 +111,6 @@ fn response_function(req: Request<Body>) -> BoxFut {
                             "Success".to_string(),
                             response,
                         );
-
                         info!("GET pubkey return 200 response.");
                     }
 
@@ -262,6 +260,7 @@ fn response_function(req: Request<Body>) -> BoxFut {
                     "Success".to_string(),
                     response,
                 );
+
             } else {
                 warn!("Bad GET request for {}", req.uri());
                 res = common::json_response_content(

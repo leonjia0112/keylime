@@ -5,6 +5,16 @@ extern crate serde_json;
 use hyper::{header, Body, Response, StatusCode};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
+use serde_json::{Map, Value};
+
+pub const STUB_VTPM: bool = false;
+pub const STUB_IMA: bool = true;
+pub const TPM_DATA_PCR: usize = 16;
+pub const IMA_PCR: usize = 10;
+pub static RSA_PUBLICKEY_EXPORTABLE: &'static str = "placeholder";
+pub static TPM_TOOLS_PATH: &'static str = "/usr/local/bin/";
+pub static IMA_ML_STUB: &'static str = "../scripts/ima/ascii_runtime_measurements";
+pub static IMA_ML: &'static str = "/sys/kernel/security/ima/ascii_runtime_measurements";
 
 pub const STUB_VTPM: bool = false;
 pub const STUB_IMA: bool = true;
@@ -35,7 +45,6 @@ pub fn json_response_content(
     integrated_results.insert("status".into(), status.into());
 
     let results_value: Value = results.into();
-
     match serde_json::to_string(&results_value) {
         Ok(json) => {
             // return a json response
