@@ -19,6 +19,8 @@ use std::thread;
 use std::time::Duration;
 use std::time::SystemTime;
 use tempfile::NamedTempFile;
+use std::error::Error;
+use std::fmt;
 
 const MAX_TRY: usize = 10;
 const RETRY_SLEEP: Duration = Duration::from_millis(50);
@@ -644,6 +646,40 @@ fn read_file_output_path(output_path: String) -> std::io::Result<String> {
     file.read_to_string(&mut contents)?;
     Ok(contents)
 }
+
+// TPM command execution custom error type
+#[derive(Debug)]
+struct TpmExecError {
+    code: i32,
+    details: String,
+}
+
+impl TpmExecError {
+    fn new(err_code: i32, err_msg: &str) -> TpmExecError {
+        TpmExecError {
+           code: err_code,
+           details: err_msg.to_string(),
+        }
+    }
+}
+
+impl Error for TpmExecError {
+    fn description(&self) -> &str {
+        &self.details
+    }
+
+    fn cause(&self) -> Option<&Error> {
+        None
+    }
+}
+
+impl fmt::Display for TpmExecError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "TPM Command Excution Fail:\nError code: {}.\nError Detail: 
+               {}.", &self.code, &self.details)
+    }
+}
+
 
 /*
  * These test are for Centos and tpm4720 elmulator install environment. It
