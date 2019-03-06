@@ -8,6 +8,8 @@ use flate2::Compression;
 use openssl::sha;
 use serde_json::Value;
 use std::env;
+use std::error::Error;
+use std::fmt;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufWriter;
@@ -19,8 +21,6 @@ use std::thread;
 use std::time::Duration;
 use std::time::SystemTime;
 use tempfile::NamedTempFile;
-use std::error::Error;
-use std::fmt;
 
 const MAX_TRY: usize = 10;
 const RETRY_SLEEP: Duration = Duration::from_millis(50);
@@ -169,8 +169,9 @@ pub fn is_vtpm() -> bool {
  * is_vtpm helper method
  */
 fn get_tpm_manufacturer() -> Result<String, Box<String>> {
-    let (return_output, _, _) =
-        run("getcapability -cap 1a".to_string(), EXIT_SUCCESS, None)?;
+    let (return_output, _) =
+        run("getcapability -cap 1a".to_string(), EXIT_SUCCESS, None)
+            .map_err(|e| Box::new(e.description().to_string()))?;
 
     let lines: Vec<&str> = return_output.split("\n").collect();
     let mut manufacturer = String::new();
@@ -281,11 +282,13 @@ pub fn create_quote(
         key_handle, aik_password, pcrmask, nonce, quote_path,
     );
 
-    let (_, _, quote_raw) = match run(command, EXIT_SUCCESS, Some(quote_path))
-    {
-        Ok((o, c, q)) => ((o, c, q)),
+    let (_, quote_raw) = match run(command, EXIT_SUCCESS, Some(quote_path)) {
+        Ok((o, q)) => ((o, q)),
         Err(e) => {
-            error!("Failed to execute TPM command with error {}.", e);
+            error!(
+                "Failed to execute TPM command with error {}.",
+                e.description()
+            );
             return None;
         }
     };
@@ -404,11 +407,13 @@ pub fn create_deep_quote(
     );
 
     // RUN
-    let (_, _, quote_raw) = match run(command, EXIT_SUCCESS, Some(quote_path))
-    {
-        Ok((o, c, q)) => ((o, c, q)),
+    let (_, quote_raw) = match run(command, EXIT_SUCCESS, Some(quote_path)) {
+        Ok((o, q)) => ((o, q)),
         Err(e) => {
-            error!("Failed to execute TPM command with error {}.", e);
+            error!(
+                "Failed to execute TPM command with error {}.",
+                e.description()
+            );
             return None;
         }
     };
@@ -520,7 +525,7 @@ pub fn run<'a>(
     command: String,
     expect_code: i32,
     output_path: Option<&str>,
-) -> Result<(String, i32, String), Box<String>> {
+) -> Result<(String, String), Box<TpmExecError>> {
     let mut t_diff: u64 = 0;
     let mut file_output = String::new();
     let mut output: Output;
@@ -540,7 +545,12 @@ pub fn run<'a>(
     env_vars.insert("TPM_SERVER_NAME".to_string(), "localhost".to_string());
     match env_vars.get_mut("PATH") {
         Some(v) => v.push_str(common::TPM_TOOLS_PATH),
-        None => return emsg("PATH doesn't exist.", None::<String>),
+        None => {
+            return TpmExecError::box_err(
+                10,
+                "Environment variable PATH doesn't exist.",
+            );
+        }
     }
 
     // main loop
@@ -551,13 +561,13 @@ pub fn run<'a>(
         output = match Command::new(&cmd).args(args).envs(&env_vars).output()
         {
             Ok(o) => o,
-            Err(e) => return emsg("Failed to execute command", Some(e)),
+            Err(e) => return TpmExecError::box_err(11, e.description()),
         };
 
         // measure execution time
         t_diff = match t0.duration_since(t0) {
             Ok(t_delta) => t_delta.as_secs(),
-            Err(e) => return emsg("Can't get time duration", Some(e)),
+            Err(e) => return TpmExecError::box_err(12, e.description()),
         };
         info!("Time cost: {}", t_diff);
 
@@ -568,12 +578,12 @@ pub fn run<'a>(
             Some(TPM_IO_ERROR) => {
                 number_tries += 1;
                 if number_tries >= MAX_TRY {
-                    return emsg(
+                    return TpmExecError::box_err(
+                        13,
                         "TPM appears to be in use by another application. 
-                                Keylime is incompatible with other TPM TSS 
-                                applications like trousers/tpm-tools. Please 
-                                uninstall or disable.",
-                        None::<String>,
+                         Keylime is incompatible with other TPM TSS 
+                         applications like trousers/tpm-tools. Please 
+                         uninstall or disable.",
                     );
                 }
 
@@ -585,31 +595,26 @@ pub fn run<'a>(
                 );
 
                 thread::sleep(RETRY_SLEEP);
-            }
+           }
 
-            _ => break 'exec,
+           _ => break 'exec,
         }
     }
 
     // preprocess execution result
-    let return_output = String::from_utf8(output.stdout).map_err(|e| {
-        Box::new(format!(
-            "Can't convert output to utf8 encoded String. Error {}.",
-            e,
-        ))
-    })?;
+    let return_output = String::from_utf8(output.stdout)
+        .map_err(|e| TpmExecError::new(14, e.description()))?;
 
     // preprocess execution status code
     let return_code = match output.status.code() {
         Some(c) => c,
-        None => {
-            return emsg("Execution status code is None.", None::<String>);
-        }
+        None => return TpmExecError::box_err(15, "Execution return code is missing."),
     };
 
     // Execution return code checking
     if return_code != expect_code {
-        return emsg(
+        return TpmExecError::box_err(
+            return_code,
             format!(
                 "Command: {} returned {}, expected {}, output {}",
                 command,
@@ -618,7 +623,6 @@ pub fn run<'a>(
                 return_output,
             )
             .as_str(),
-            None::<String>,
         );
     }
 
@@ -626,11 +630,11 @@ pub fn run<'a>(
     if let Some(p) = output_path {
         file_output = match read_file_output_path(p.to_string()) {
             Ok(content) => content,
-            Err(e) => return emsg("Failed to read output path", Some(e)),
+            Err(e) => return TpmExecError::box_err(16, e.description()),
         };
     }
 
-    Ok((return_output, return_code, file_output))
+    Ok((return_output, file_output))
 }
 
 /*
@@ -649,7 +653,7 @@ fn read_file_output_path(output_path: String) -> std::io::Result<String> {
 
 // TPM command execution custom error type
 #[derive(Debug)]
-struct TpmExecError {
+pub struct TpmExecError {
     code: i32,
     details: String,
 }
@@ -657,9 +661,13 @@ struct TpmExecError {
 impl TpmExecError {
     fn new(err_code: i32, err_msg: &str) -> TpmExecError {
         TpmExecError {
-           code: err_code,
-           details: err_msg.to_string(),
+            code: err_code,
+            details: err_msg.to_string(),
         }
+    }
+
+    fn box_err(err_code: i32, err_msg: &str) -> Result<(String, String), Box<TpmExecError>> {
+        Err(Box::new(TpmExecError::new(err_code, err_msg)))
     }
 }
 
@@ -675,11 +683,14 @@ impl Error for TpmExecError {
 
 impl fmt::Display for TpmExecError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "TPM Command Excution Fail:\nError code: {}.\nError Detail: 
-               {}.", &self.code, &self.details)
+        write!(
+            f,
+            "TPM Command Excution Fail:\nError code: {}.\nError Detail: 
+               {}.",
+            &self.code, &self.details
+        )
     }
 }
-
 
 /*
  * These test are for Centos and tpm4720 elmulator install environment. It
