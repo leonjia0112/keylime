@@ -5,8 +5,11 @@ extern crate openssl;
 use openssl::error::ErrorStack;
 use openssl::hash::MessageDigest;
 use openssl::pkcs5;
-use openssl::pkey::PKey;
+use openssl::pkey::{PKey, Private, Public};
+use openssl::rsa::Rsa;
 use openssl::sign::Signer;
+use std::fs::File;
+use std::io::Read;
 use std::string::String;
 
 /*
@@ -26,6 +29,33 @@ pub fn do_hmac(
     signer.update(message)?;
     let hmac = signer.sign_to_vec()?;
     Ok(to_hex_string(hmac))
+}
+
+/*
+ * Input: path to PEM-encoded RSA public key
+ * Output: OpenSSL RSA key object
+ *
+ * Import a PEM-encoded RSA public key and return a callable OpenSSL RSA key
+ * object.
+ */
+pub fn rsa_import_pubkey(
+    input_key_path: String,
+) -> Result<Rsa<Public>, ErrorStack> {
+    let mut key_buffer = vec![0; 1];
+    if let Ok(mut input_key) = File::open(input_key_path) {
+        input_key.read_to_end(&mut key_buffer);
+    }
+    Ok(Rsa::public_key_from_pem(&key_buffer)?)
+}
+
+/*
+ * Input: desired key size
+ * Output: OpenSSL RSA key object
+ *
+ * Randomly generate a callable OpenSSL RSA key object with desired key size.
+ */
+pub fn rsa_generate(key_size: u32) -> Result<Rsa<Private>, ErrorStack> {
+    Ok(Rsa::generate(key_size)?)
 }
 
 /*
