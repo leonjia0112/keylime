@@ -285,7 +285,10 @@ pub fn create_quote(
     let (_, quote_raw) = match run(command, EXIT_SUCCESS, Some(quote_path)) {
         Ok((o, q)) => ((o, q)),
         Err(e) => {
-            error!("Failed to execute TPM command with error {}.", e);
+            error!(
+                "Failed to execute TPM command with error {}.",
+                e.description()
+            );
             return None;
         }
     };
@@ -407,7 +410,10 @@ pub fn create_deep_quote(
     let (_, quote_raw) = match run(command, EXIT_SUCCESS, Some(quote_path)) {
         Ok((o, q)) => ((o, q)),
         Err(e) => {
-            error!("Failed to execute TPM command with error {}.", e);
+            error!(
+                "Failed to execute TPM command with error {}.",
+                e.description()
+            );
             return None;
         }
     };
@@ -582,9 +588,9 @@ pub fn run<'a>(
                 );
 
                 thread::sleep(RETRY_SLEEP);
-            }
+           }
 
-            _ => break 'exec,
+           _ => break 'exec,
         }
     }
 
@@ -632,6 +638,47 @@ fn read_file_output_path(output_path: String) -> std::io::Result<String> {
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
     Ok(contents)
+}
+
+// TPM command execution custom error type
+#[derive(Debug)]
+pub struct TpmExecError {
+    code: i32,
+    details: String,
+}
+
+impl TpmExecError {
+    fn new(err_code: i32, err_msg: &str) -> TpmExecError {
+        TpmExecError {
+            code: err_code,
+            details: err_msg.to_string(),
+        }
+    }
+
+    fn box_err(err_code: i32, err_msg: &str) -> Result<(String, String), Box<TpmExecError>> {
+        Err(Box::new(TpmExecError::new(err_code, err_msg)))
+    }
+}
+
+impl Error for TpmExecError {
+    fn description(&self) -> &str {
+        &self.details
+    }
+
+    fn cause(&self) -> Option<&Error> {
+        None
+    }
+}
+
+impl fmt::Display for TpmExecError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "TPM Command Excution Fail:\nError code: {}.\nError Detail: 
+               {}.",
+            &self.code, &self.details
+        )
+    }
 }
 
 /*
