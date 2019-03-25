@@ -2,10 +2,9 @@ extern crate base64;
 extern crate flate2;
 
 use super::*;
-use common::emsg;
+use crypto::KeylimeCryptoError;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
-use openssl::sha;
 use openssl::sha::Sha256;
 use serde_json::Value;
 use std::env;
@@ -30,19 +29,258 @@ const RETRY: usize = 4;
 
 static EMPTYMASK: &'static str = "1";
 
-/*
- * Input:
- *     A temp file
- * Return:
- *     The temp file path
- *     KeylimeTpmError
- */
-fn temp_file_get_path<'a>(
-    ref temp_file: &'a NamedTempFile,
-) -> Result<&'a str, KeylimeTpmError> {
-    temp_file.path().to_str().ok_or_else(|| {
-        KeylimeTpmError::new_tpm_rust_error("Can't retrieve temp file path.")
-    })
+fn tpm_init(self_activate: bool, config_pw: String) -> Result<(), KeylimeTpmError> {
+    warn_emulator();
+    tpm_take_ownership(config_pw);
+    tpm_create_ek();
+    tpm_get_pub_ek();
+
+    // read cert nvram
+    tpm_create_aik();
+
+    let ek = get_tpm_metadata_content("ek")?;
+    let ekcert = get_tpm_metadata_content("ekcert")?;
+    let aik = get_tpm_metadata_content("aik")?;
+    let ek_tpm = get_tpm_metadata_content("ek_tpm")?;
+    let aik_name = get_tpm_metadata_content("aik_name")?;
+    Ok(())
+}
+
+fn tpm_read_ekcert_nvram() -> Result<String, KeylimeTpmError> {
+    let tf = NamedTempFile::new()?;
+    let nvpath = temp_file_get_path(&tf)?;
+    let (ret_out, _) = run("tpm2_nvlist".to_string(), None)?;
+    let ret_out_map = yaml_string_to_map(ret_out)?;
+    let ekcert_size = ret_out_map
+        .get(&0x1c00002)
+        .map_or_else(|| 0, |v| v.get("size").unwrap_or_else(|| 0));
+    if ekcert_size == 0 {
+        return Err(KeylimeTpmError::new_tpm_rust_error(
+            "ekcert size is zero.",
+        ));
+    }
+
+    let (_, f_out) = run(
+        format!("tpm2_nvread -x 0x1c00002 -s {} -f {}", ekcert, nvpath),
+        None,
+    )?;
+    let ekcert = f_out
+        .get(nvpath)
+        .ok_or_else(|| KeylimeTpmError::new_tpm_rust_error("failed to ekcert"))?;
+    Ok(base64::encode(ekcert))
+}
+
+fn tpm_create_aik(
+    asym_alg: String,
+    hash_alg: String,
+    sign_alg: String,
+) -> Result<(), KeylimeTpmError> {
+    let owner_pw = get_tpm_metadata_content("owner_pw")?;
+    let aik = get_tpm_metadata_content("aik")?;
+    let aik_name = get_tpm_metadata_content("aik_name")?;
+
+    if !aik.is_empty() && !aik_name.is_empty() {
+        let aik_handle = get_tpm_metadata_content("aik_handle")?;
+
+        let (ret_out, _) =
+            run("tpm2_getcap -c handles-persisitent".to_string(), None)?;
+        let ret_out_map = yaml_string_to_map(ret_out)?;
+        if ret_out_map.contains_key(&aik_handle) {
+            run(
+                format!(
+                    "tpm2_evictcontrol -a o -c {} -P {}",
+                    aik_handle, owner_pw
+                ),
+                None,
+            )?;
+        }
+        set_tpm_metadata_content("aik", "")?;
+        set_tpm_metadata_content("aik_name", "")?;
+        set_tpm_metadata_content("aik_pw", "")?;
+        set_tpm_metadata_content("aik_handle", "")?;
+    }
+
+    let ek_handle = get_tpm_metadata_content("ek_handle")?;
+    if ek_handle.is_empty() {
+        return Err(KeylimeTpmError::new_tpm_rust_error(
+            "create ek failed. ek_handle is missing",
+        ));
+    }
+    let aik_pw = random_password(20).unwrap();
+
+    let tf = NamedTempFile::new()?;
+    let aik_pub_path = temp_file_get_path(&tf)?;
+    let paths = vec![aik_pub_path];
+    let (ret_out, f_out) = run(
+        format!(
+            "tpm2_createek -C {} -k - -G {} -D {} -s {} -p {} -f pem -e {} -P {} -o {}",
+            hex::encode(ek_handle),
+            asym_alg,
+            hash_alg,
+            sign_alg,
+            aik_pub_path,
+            owner_pw,
+            aik_pw,
+            owner_pw,
+        ),
+        Some(paths)
+    )?;
+
+    let ret_out_map = yaml_string_to_map(ret_out)?;
+    let handle: &str = ret_out_map
+        .get("ak-persistent-handle")
+        .map_or_else(|| "", |v| v.as_str().unwrap_or_else(|| ""));
+
+    let akname: &str = ret_out_map.get("load-key").map_or_else(
+        || "",
+        |k| {
+            k.get("name")
+                .map_or_else(|| "", |v| v.as_str().unwrap_or_else(|| ""))
+        },
+    );
+
+    let pem = f_out.get(aik_pub_path).ok_or_else(|| {
+        KeylimeTpmError::new_tpm_rust_error(
+            "tpm2_createek failed with aik pub key missing.",
+        )
+    })?;
+
+    if handle == "" || akname == "" {
+        return Err(
+            KeylimeTpmError::new_tpm_rust_error(
+                "tpm2_createek failed with handle or akname output attribute missing."
+            )
+        );
+    }
+    set_tpm_metadata_content("aik", &pem)?;
+    set_tpm_metadata_content("aik_name", akname)?;
+    set_tpm_metadata_content("aik_pw", &aik_pw)?;
+    set_tpm_metadata_content("aik_handle", handle)?;
+    Ok(())
+}
+
+fn tpm_take_ownership(config_pw: String) -> Result<(), KeylimeTpmError> {
+    let owner_pw = match config_pw.as_str() {
+        "generate" => random_password(20).unwrap(),
+        _ => config_pw,
+    };
+
+    // Change authenticate, if the first fail, it will do it a second time.
+    if let Err(e) = run(
+        format!("tpm2_changeauth -o {} -e {}", owner_pw, owner_pw),
+        None,
+    ) {
+        run(
+            format!(
+                "tpm2_changeauth -o {} -e {} -o {} -E {}",
+                owner_pw, owner_pw, owner_pw, owner_pw
+            ),
+            None,
+        )?;
+    }
+    set_tpm_metadata_content("owner_pw", &owner_pw)?;
+    Ok(())
+}
+
+fn tpm_create_ek(
+    mut asym_alg: Option<String>,
+) -> Result<(), KeylimeTpmError> {
+    let ek_asym_alg = match asym_alg {
+        Some(a) => a,
+        None => String::from("encrypt"),
+    };
+
+    let curr_handle = get_tpm_metadata_content(&"ek_handle")?;
+    let mut owner_pw = get_tpm_metadata_content(&"owner_pw")?;
+
+    if curr_handle.is_empty() && owner_pw.is_empty() {
+        let (ret_out, _) =
+            run(format!("tpm_getcap -c handles-persistent"), None)?;
+        let v: Vec<&str> = ret_out.matches(&curr_handle).collect();
+        if !v.is_empty() {
+            run(
+                format!(
+                    "tpm2_evictcontrol -a o -c {} -P {}",
+                    hex::encode(curr_handle),
+                    owner_pw
+                ),
+                None,
+            )?;
+        }
+    }
+
+    if owner_pw.is_empty() {
+        owner_pw = random_password(20).unwrap();
+        set_tpm_metadata_content(&"owner_pw", &owner_pw);
+    }
+
+    // Get the ek from TPM
+    let ek_pw = random_password(20).unwrap();
+    let tf = NamedTempFile::new()?;
+    let tf_path = temp_file_get_path(&tf)?;
+    let paths: Vec<&str> = vec![tf_path];
+    let (ret_out, f_out) = run(
+        format!(
+            "tpm2_createek -c -G {} -p {} -P {} -o {} -e {}",
+            ek_asym_alg, tf_path, ek_pw, owner_pw, owner_pw
+        ),
+        Some(paths),
+    )?;
+
+    // Process execution file output
+    let ek_tpm = f_out.get(tf_path).ok_or_else(|| {
+        KeylimeTpmError::new_tpm_rust_error(
+            "Createek output to file content is missing",
+        )
+    })?;
+
+    // Check createek out and getting the handle if present
+    let ret_out_map = ret_out
+        .split('\n')
+        .map(|ln| ln.split(':'))
+        .map(|mut kv| match (kv.next(), kv.next()) {
+            (Some(k), Some(v)) => (k.into(), v.into()),
+            _ => (String::from("k"), String::from("v")),
+        })
+        .collect::<HashMap<String, String>>();
+
+    if ret_out_map.contains_key("persistent-handle") {
+        let handle =
+            ret_out_map.get("persistent-handle").ok_or_else(|| {
+                KeylimeTpmError::new_tpm_rust_error(
+                    "persistent-handle content is missing.",
+                )
+            })?;
+        set_tpm_metadata_content("ek_handle", &handle);
+    } else {
+        set_tpm_metadata_content("ek_handle", "");
+    }
+    set_tpm_metadata_content("ek_pw", &ek_pw);
+    set_tpm_metadata_content("ek_tpm", &base64::encode(&ek_tpm));
+    Ok(())
+}
+
+fn tpm_get_pub_ek() -> Result<(), KeylimeTpmError> {
+    let handle = get_tpm_metadata_content("ek_handle")?;
+    let tf = NamedTempFile::new()?;
+    let tf_path = temp_file_get_path(&tf)?;
+    let paths = vec![tf_path];
+
+    let (_, path_map) = run(
+        format!(
+            "tpm2_readpublic -c {} -o {} -f pem",
+            hex::encode(handle),
+            tf_path
+        ),
+        Some(paths),
+    )?;
+    let ek = path_map.get(tf_path).ok_or_else(|| {
+        KeylimeTpmError::new_tpm_rust_error(
+            "tpm2_readpublic fail, ek key is missing is output file.",
+        )
+    })?;
+    set_tpm_metadata_content("ek", &ek);
+    Ok(())
 }
 
 /*
@@ -50,7 +288,8 @@ fn temp_file_get_path<'a>(
  *     content key in tpmdata
  * Return:
  *     Value string
- *     KeylimeTpmError
+ *     KeylimeTpmError if the request content doesn't exist or reading file
+ *     encounter error or content is not utf8 encoded.
  *
  * Getting the tpm data struct and convert it to a json value object to
  * retrive a particular value by the given key inside the tpm data.
@@ -59,11 +298,7 @@ fn get_tpm_metadata_content(key: &str) -> Result<String, KeylimeTpmError> {
     let tpm_data = read_tpm_data()?;
     let remove: &[_] = &['"', ' ', '/'];
     tpm_data.get(key).map_or_else(
-        || {
-            Err(KeylimeTpmError::new_tpm_rust_error(
-                format!("Key: {} is missing in tpmdata.json", key).as_str(),
-            ))
-        },
+        || Ok(String::new()), // emty string if content not present
         |content| {
             content.as_str().map_or_else(
                 || {
@@ -147,6 +382,21 @@ fn write_tpm_data(data: Value) -> Result<(), KeylimeTpmError> {
 }
 
 /*
+ * Input:
+ *     A temp file
+ * Return:
+ *     The temp file path
+ *     KeylimeTpmError
+ */
+fn temp_file_get_path<'a>(
+    ref temp_file: &'a NamedTempFile,
+) -> Result<&'a str, KeylimeTpmError> {
+    temp_file.path().to_str().ok_or_else(|| {
+        KeylimeTpmError::new_tpm_rust_error("Can't retrieve temp file path.")
+    })
+}
+
+/*
  * Return:
  *     true for vtpm/false otherwise
  *
@@ -166,7 +416,7 @@ pub fn is_vtpm() -> bool {
  * in its manufacturer information list.
  */
 pub fn is_software_tpm() -> bool {
-    match get_tpm_manufacturer() {
+    match tpm_get_manufacturer() {
         Ok(data) => data == "SW",
         Err(e) => {
             warn!("Fail to get tpm manufacturer information. Error {}.", e);
@@ -183,7 +433,7 @@ pub fn is_software_tpm() -> bool {
  * getting the tpm manufacturer information
  * is_vtpm helper method
  */
-fn get_tpm_manufacturer() -> Result<String, KeylimeTpmError> {
+fn tpm_get_manufacturer() -> Result<String, KeylimeTpmError> {
     let (return_output, _) =
         run("tpm2_getcap -c properties-fixed".to_string(), None)?;
     let ret_to_json: Value = serde_json::from_str(&return_output)?;
@@ -246,7 +496,7 @@ pub fn create_quote(
 
     let paths = vec![quote_path, sign_path, pcr_path];
 
-    let (_, mut quotes) = run(
+    let (_, quotes) = run(
         format!(
             "tpm2_deluxequote -C {} -L {}:{} -q {} -m {} -s {} -p {} -G {} -P {}",
             hex::encode(key_handle),
@@ -276,12 +526,47 @@ pub fn create_quote(
 pub fn create_deep_quote(
     nonce: String,
     data: String,
-    mut pcrmask: String,
-    mut vpcrmask: String,
+    pcrmask: String,
+    vpcrmask: String,
 ) -> Result<String, KeylimeTpmError> {
     Err(KeylimeTpmError::new_tpm_rust_error(
         "Deep quote in progress.",
     ))
+}
+
+/*
+ * Warning for not using physical TPM
+ */
+fn emulator_warning() {
+    if is_software_tpm() {
+        warn!(
+            "INSECURE: Keylime is using a software TPM emulator rather than a
+              real hardware TPM."
+        );
+        warn!(
+            "INSECURE: The security of Keylime is NOT linked to a hardware
+              root of trust."
+        );
+        warn!(
+            "INSECURE: Only use Keylime in this mode for testing or debugging
+              purposes."
+        );
+    }
+}
+
+fn random_password(length: usize) -> Result<String, KeylimeCryptoError> {
+    let rand_byte = crypto::generate_random_byte(&length)?;
+    let alphabet: Vec<char> =
+        "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGIJKLMNOPQRSTUVWXYZ"
+            .chars()
+            .collect();
+
+    let mut password = Vec::new();
+    for i in rand_byte.as_slice() {
+        password.push(alphabet[*i as usize % alphabet.len()]);
+    }
+    let password_str: String = password.iter().collect();
+    Ok(password_str)
 }
 
 /*
@@ -302,6 +587,19 @@ fn base64_zlib_encode(data: String) -> Result<String, KeylimeTpmError> {
     encoder.write_all(data.as_bytes())?;
     let compressed_bytes = encoder.finish()?;
     Ok(base64::encode(&compressed_bytes))
+}
+
+fn yaml_string_to_map(
+    my_str: String,
+) -> Result<Map<String, Value>, KeylimeTpmError> {
+    let yaml_obj: Value = serde_yaml::from_str(&my_str)?;
+    let yaml_map: &Map<String, Value> =
+        yaml_obj.as_object().ok_or_else(|| {
+            KeylimeTpmError::new_tpm_rust_error(
+                "Failed to convert output to yuaml.",
+            )
+        })?;
+    Ok(yaml_map.to_owned()) // clone data and return ownership
 }
 
 /*
@@ -364,6 +662,20 @@ pub fn is_deep_quote(quote: String) -> bool {
 }
 
 /*
+ * Input: file name
+ * Return: the content of the file int Result<>
+ *
+ * run method helper method
+ * read in the file and  return the content of the file into a Result enum
+ */
+fn read_file_output_path(output_path: String) -> std::io::Result<String> {
+    let mut file = File::open(output_path)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(contents)
+}
+
+/*
  * Input:
  *     command: command to be executed
  *     output_path: file output location
@@ -382,9 +694,6 @@ pub fn run(
     command: String,
     output_path: Option<Vec<&str>>,
 ) -> Result<(String, HashMap<String, String>), KeylimeTpmError> {
-    let mut file_output = String::new();
-    let mut output: Output;
-
     // tokenize input command
     let words: Vec<&str> = command.split(" ").collect();
     let mut number_tries = 0;
@@ -396,7 +705,6 @@ pub fn run(
     for (key, value) in env::vars() {
         env_vars.insert(key.to_string(), value.to_string());
     }
-    let mut lib_path = String::new();
     let lib_path = env_vars
         .get("LD_LIBRARY_PATH")
         .map_or_else(|| String::new(), |v| v.clone());
@@ -421,6 +729,7 @@ pub fn run(
     }
 
     // main loop
+    let mut output: Output;
     'exec: loop {
         // Start time stamp
         let t0 = SystemTime::now();
@@ -492,20 +801,6 @@ pub fn run(
 }
 
 /*
- * Input: file name
- * Return: the content of the file int Result<>
- *
- * run method helper method
- * read in the file and  return the content of the file into a Result enum
- */
-fn read_file_output_path(output_path: String) -> std::io::Result<String> {
-    let mut file = File::open(output_path)?;
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)?;
-    Ok(contents)
-}
-
-/*
  * Custom Error type for tpm execution error. It contains both error from the
  * TPM command execution result or error cause by rust function. Potential
  * rust error are map to this error by implemented From<> trait.
@@ -536,7 +831,7 @@ impl Error for KeylimeTpmError {
         match &self {
             KeylimeTpmError::TpmError {
                 ref details,
-                ref code,
+                code: _,
             } => details,
             KeylimeTpmError::TpmRustError { ref details } => details,
         }
@@ -593,6 +888,13 @@ impl From<std::num::ParseIntError> for KeylimeTpmError {
         KeylimeTpmError::new_tpm_rust_error(e.description())
     }
 }
+
+impl From<serde_yaml::Error> for KeylimeTpmError {
+    fn from(e: serde_yaml::Error) -> KeylimeTpmError {
+        KeylimeTpmError::new_tpm_rust_error(e.description())
+    }
+}
+
 /*
  * These test are for Centos and tpm4720 elmulator install environment. It
  * test tpm command before execution.
@@ -629,11 +931,11 @@ mod tests {
     }
 
     #[test]
-    fn test_get_manufacturer() {
+    fn test_tpm_get_manufacturer() {
         match command_exist("tpm2_getcap") {
             true => {
                 assert!(tpm_initialize().is_ok());
-                assert!(get_tpm_manufacturer().is_ok());
+                assert!(tpm_get_manufacturer().is_ok());
             }
             false => assert!(true),
         }
@@ -697,6 +999,12 @@ mod tests {
         let password = get_tpm_metadata_content("owner_pw")
             .expect("Failed to get owner_pw.");
         assert_eq!(password.trim_matches(remove), String::from("hello"));
+    }
+
+    #[test]
+    fn test_random_password() {
+        let pw = random_password(20).unwrap();
+        assert(pw.len(), 20);
     }
 
     /*
