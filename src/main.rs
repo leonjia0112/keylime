@@ -49,8 +49,15 @@ fn main() {
     /* Should be port 3000 eventually */
     let addr = ([127, 0, 0, 1], 1337).into();
 
+    let TPM_mod = tpm::TPM::new();
+
+    let new_service = move || {
+        let TPM_mod_clone = TPM_mod.clone();
+        service_fn(move |req| response_function(req, TPM_mod_clone))
+    };
+
     let server = Server::bind(&addr)
-        .serve(|| service_fn(response_function))
+        .serve(new_service)
         .map_err(|e| error!("server error: {}", e));
 
     info!("Listening on http://{}", addr);
@@ -59,7 +66,7 @@ fn main() {
     hyper::rt::run(server);
 }
 
-fn response_function(req: Request<Body>) -> BoxFut {
+fn response_function(req: Request<Body>, TPMMod: TPM) -> BoxFut {
     let mut my_response: Response<Body> =
         Response::new("Nothing here.".into());
 
